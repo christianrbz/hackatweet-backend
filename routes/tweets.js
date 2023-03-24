@@ -20,7 +20,7 @@ router.post('/', (req, res) => {
     // Create a new tweet with the information provided in the request
     const tweet = new Tweet({
         text: req.body.text,
-        hashtag: '#' + req.body.hashtag,
+        hashtag: req.body.hashtag,
         like: 0,
         user: req.body.user // ID of the user sending the tweet
     });
