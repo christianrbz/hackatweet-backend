@@ -1,67 +1,159 @@
 var express = require('express');
 var router = express.Router();
 
-require('../models/connection');
 const User = require('../models/users');
-const { checkBody } = require('../modules/checkBody');
 const Tweet = require('../models/tweets');
-
+const { checkBody } = require('../modules/checkBody');
 
 router.post('/', (req, res) => {
-    // Check that the text of the tweet does not exceed 280 characters
-    if (!checkBody(req.body, ['text', 'hashtag', 'user'])) {
+    if (!checkBody(req.body, ['token', 'content'])) {
         res.json({ result: false, error: 'Missing or empty fields' });
         return;
     }
-    if (req.body.text.length > 280) {
-        return res.json({ error: "The text of the tweet must not exceed 280 characters." });
+
+    User.findOne({ token: req.body.token }).then(user => {
+        if (user === null) {
+            res.json({ result: false, error: 'User not found' });
+            return;
+        }
+
+        const newTweet = new Tweet({
+            author: user._id,
+            content: req.body.content,
+            createdAt: new Date(),
+        });
+
+        newTweet.save().then(newDoc => {
+            res.json({ result: true, tweet: newDoc });
+        });
+    });
+});
+
+router.get('/all/:token', (req, res) => {
+    User.findOne({ token: req.params.token }).then(user => {
+        if (user === null) {
+            res.json({ result: false, error: 'User not found' });
+            return;
+        }
+
+        Tweet.find() // Populate et sélectionne des champs spécifiques en return (par but de sécurité) (clé étrangère)
+            .populate('author', ['username', 'firstName'])
+            .populate('likes', ['username'])
+            .sort({ createdAt: 'desc' })
+            .then(tweets => {
+                res.json({ result: true, tweets });
+            });
+    });
+});
+
+router.get('/trends/:token', (req, res) => {
+    User.findOne({ token: req.params.token }).then(user => {
+        if (user === null) {
+            res.json({ result: false, error: 'User not found' });
+            return;
+        }
+
+        Tweet.find({ content: { $regex: /#/ } })
+            .then(tweets => {
+                const hashtags = [];
+
+                for (const tweet of tweets) {
+                    const filteredHashtags = tweet.content.split(' ').filter(word => word.startsWith('#') && word.length > 1);
+                    hashtags.push(...filteredHashtags);
+                }
+
+                const trends = [];
+                for (const hashtag of hashtags) {
+                    const trendIndex = trends.findIndex(trend => trend.hashtag === hashtag);
+                    if (trendIndex === -1) {
+                        trends.push({ hashtag, count: 1 });
+                    } else {
+                        trends[trendIndex].count++;
+                    }
+                }
+
+                res.json({ result: true, trends: trends.sort((a, b) => b.count - a.count) });
+            });
+    });
+});
+
+router.get('/hashtag/:token/:query', (req, res) => {
+    User.findOne({ token: req.params.token }).then(user => {
+        if (user === null) {
+            res.json({ result: false, error: 'User not found' });
+            return;
+        }
+
+        Tweet.find({ content: { $regex: new RegExp('#' + req.params.query, 'i') } }) 
+            .populate('author', ['username', 'firstName'])
+            .populate('likes', ['username'])
+            .sort({ createdAt: 'desc' })
+            .then(tweets => {
+                res.json({ result: true, tweets });
+            });
+    });
+});
+
+router.put('/like', (req, res) => {
+    if (!checkBody(req.body, ['token', 'tweetId'])) {
+        res.json({ result: false, error: 'Missing or empty fields' });
+        return;
     }
 
-    // Create a new tweet with the information provided in the request
-    const tweet = new Tweet({
-        text: req.body.text,
-        hashtag: req.body.hashtag,
-        like: 0,
-        user: req.body.user // ID of the user sending the tweet
+    User.findOne({ token: req.body.token }).then(user => {
+        if (user === null) {
+            res.json({ result: false, error: 'User not found' });
+            return;
+        }
+
+        Tweet.findById(req.body.tweetId).then(tweet => {
+            if (!tweet) {
+                res.json({ result: false, error: 'Tweet not found' });
+                return;
+            }
+
+            if (tweet.likes.includes(user._id)) { // User aime déjà le tweet
+                Tweet.updateOne({ _id: tweet._id }, { $pull: { likes: user._id } }) // Supprimer user ID des likes
+                    .then(() => {
+                        res.json({ result: true });
+                    });
+            } else { // User has not liked the tweet
+                Tweet.updateOne({ _id: tweet._id }, { $push: { likes: user._id } }) // Ajouter user ID aux likes
+                    .then(() => {
+                        res.json({ result: true });
+                    });
+            }
+        });
     });
-    // Save the tweet in the database
-    tweet.save();
-    res.json({ result: true, tweet: tweet });
 });
 
+router.delete('/', (req, res) => {
+    if (!checkBody(req.body, ['token', 'tweetId'])) {
+        res.json({ result: false, error: 'Missing or empty fields' });
+        return;
+    }
 
+    User.findOne({ token: req.body.token }).then(user => {
+        if (user === null) {
+            res.json({ result: false, error: 'User not found' });
+            return;
+        }
 
+        Tweet.findById(req.body.tweetId)
+            .populate('author')
+            .then(tweet => {
+                if (!tweet) {
+                    res.json({ result: false, error: 'Tweet not found' });
+                    return;
+                } else if (String(tweet.author._id) !== String(user._id)) { // ObjectId a besoin d'être convertit en string (JavaScript ne peut pas comparer 2 objects)
+                    res.json({ result: false, error: 'Tweet can only be deleted by its author' });
+                    return;
+                }
 
-router.delete('/:id', (req, res) => {
-    Tweet.deleteOne({
-        _id: req.params.id
-    }).then(deletedDoc => {
-        if (deletedDoc.deletedCount > 0) {
-            // document successfully deleted
-            Tweet.find().then(data => {
-                res.json({ result: true, tweet: data });
+                Tweet.deleteOne({ _id: tweet._id }).then(() => {
+                    res.json({ result: true });
+                });
             });
-        } else {
-            res.json({ result: false, error: "Tweet not found" });
-        }
-    });
-});
-
-router.get('/', (req, res) => {
-    Tweet.find().then(data => {
-        res.json({ tweets: data });
-    });
-});
-
-router.get("/:hashtag", (req, res) => {
-    Tweet.find({
-        hashtag: "#" + req.params.hashtag,
-    }).then(data => {
-        if (data) {
-            res.json({ result: true, tweets: data });
-        } else {
-            res.json({ result: false, error: "Hashtag not found" });
-        }
     });
 });
 
